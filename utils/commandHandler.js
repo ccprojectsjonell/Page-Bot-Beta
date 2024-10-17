@@ -1,12 +1,16 @@
 const fs = require('fs');
 const path = require('path');
-const request = require('request');
+const axios = require('axios');
+const FormData = require('form-data'); 
 const gradient = require('gradient-string');
 const chalk = require('chalk');
 const boldText = (text) => chalk.bold(text);
 
+const botPrefix = '!'; 
+
 const usersDbPath = path.join(__dirname, 'users.json');
 let users = {};
+
 if (fs.existsSync(usersDbPath)) {
   users = JSON.parse(fs.readFileSync(usersDbPath));
 } else {
@@ -29,40 +33,43 @@ function updateUserDatabase(senderId, recipientId, messageId) {
 }
 
 function sendMessage(senderId, message, pageAccessToken) {
-  request({
-    url: 'https://graph.facebook.com/v13.0/me/messages',
-    qs: { access_token: pageAccessToken },
-    method: 'POST',
-    json: {
-      recipient: { id: senderId },
-      message: { text: message },
-    },
-  }, (error, response, body) => {
-    if (error) {
-      console.log(boldText(gradient.cristal('Error sending message:')), error);
-    } else if (response.body.error) {
-      console.log(boldText(gradient.cristal('Error response:')), response.body.error);
-    } else {
-      console.log(boldText(gradient.summer('Message sent successfully:')), body);
+  axios.post(`https://graph.facebook.com/v13.0/me/messages`, {
+    recipient: { id: senderId },
+    message: { text: message },
+  }, {
+    params: {
+      access_token: pageAccessToken
     }
+  }).then(response => {
+    console.log(boldText(gradient.summer('Message sent successfully:')), response.data);
+  }).catch(error => {
+    console.log(boldText(gradient.cristal('Error sending message:')), error.response?.data || error.message);
+  });
+}
+
+function sendFile(senderId, filePath, pageAccessToken) {
+  const formData = new FormData();
+  formData.append('recipient', JSON.stringify({ id: senderId }));
+  formData.append('file', fs.createReadStream(filePath));
+
+  axios.post(`https://graph.facebook.com/v13.0/me/messages`, formData, {
+    params: { access_token: pageAccessToken },
+    headers: {
+      ...formData.getHeaders() 
+    }
+  }).then(response => {
+    console.log(boldText(gradient.summer('File sent successfully:')), response.data);
+  }).catch(error => {
+    console.log(boldText(gradient.cristal('Error sending file:')), error.response?.data || error.message);
   });
 }
 
 function getPageName(pageAccessToken) {
-  return new Promise((resolve, reject) => {
-    request({
-      url: `https://graph.facebook.com/v13.0/me`,
-      qs: { access_token: pageAccessToken },
-      method: 'GET'
-    }, (error, response, body) => {
-      if (error) {
-        reject('Error retrieving page name');
-      } else {
-        const pageInfo = JSON.parse(body);
-        resolve(pageInfo.name || 'Unknown Page');
-      }
-    });
-  });
+  return axios.get('https://graph.facebook.com/v13.0/me', {
+    params: { access_token: pageAccessToken }
+  }).then(response => {
+    return response.data.name || 'Unknown Page';
+  }).catch(() => 'Error retrieving page name');
 }
 
 const commands = [];
@@ -77,8 +84,8 @@ commandFiles.forEach(file => {
   } catch (error) {
     console.log(boldText(gradient.cristal(`[ ${file} ] Failed to Deploy Command: ${error.message}`)));
   }
-}); 
-global.page = commands.name
+});
+
 const pageAccessToken = process.env.TOKEN;
 
 getPageName(pageAccessToken).then(pageName => {
@@ -91,8 +98,7 @@ getPageName(pageAccessToken).then(pageName => {
 });
 
 module.exports.handleCommand = async function (event, pageAccessToken) {
-  const messageText = event.message.text.trim().toLowerCase();
-  const [commandName, ...args] = messageText.split(' ');
+  const messageText = event.message.text.trim();
   const senderId = event.sender.id;
   const recipientId = event.recipient.id;
   const messageId = event.message.mid;
@@ -104,14 +110,19 @@ module.exports.handleCommand = async function (event, pageAccessToken) {
     console.log(boldText(gradient.summer(`New user detected: ${userName} (ID: ${senderId})`)));
   }
 
+  const hasPrefix = messageText.startsWith(botPrefix);
+  const messageWithoutPrefix = hasPrefix ? messageText.slice(botPrefix.length).trim() : messageText;
+  const [commandName, ...args] = messageWithoutPrefix.split(' ');
+
   const command = commands.find(cmd => cmd.name === commandName);
 
-  if (command) {
+  if (hasPrefix && command) {
     try {
       await command.onCmds({
         bot: {
           send: (response) => sendMessage(senderId, response, pageAccessToken),
-          reply: (response) => sendMessage(senderId, response, pageAccessToken)
+          reply: (response) => sendMessage(senderId, response, pageAccessToken),
+          files: (filePath) => sendFile(senderId, filePath, pageAccessToken)
         },
         event,
         args
@@ -120,21 +131,21 @@ module.exports.handleCommand = async function (event, pageAccessToken) {
     } catch (error) {
       console.log(boldText(gradient.cristal(`Error executing command [${command.name}] for user ${userName}:`)), error);
     }
-  }
-
-  if (command && command.pageEvent && messageText.startsWith(command.eventTrigger)) {
+  } else if (!hasPrefix) {
     try {
-      await command.pageEvent({
-        bot: {
-          send: (response) => sendMessage(senderId, response, pageAccessToken),
-          reply: (response) => sendMessage(senderId, response, pageAccessToken)
-        },
-        args,
-        event: messageText
+      const response = await axios.get(`https://jonellprojectccapisexplorer.onrender.com/api/gptconvo`, {
+        params: {
+          ask: messageText,
+          id: senderId
+        }
       });
-      console.log(boldText(gradient.summer(`Page event triggered [${command.eventTrigger}] by ${userName}`)));
+
+      const apiResponse = response.data.response;
+      sendMessage(senderId, apiResponse, pageAccessToken);
+      console.log(boldText(gradient.summer(`Responded to [${userName}]: ${apiResponse}`)));
     } catch (error) {
-      console.log(boldText(gradient.cristal(`Error handling page event [${command.eventTrigger}] for user ${userName}:`)), error);
+      console.log(boldText(gradient.cristal(`Error processing message from [${userName}]:`)), error);
+      sendMessage(senderId, 'An error occurred while processing your request.', pageAccessToken);
     }
   }
 };
